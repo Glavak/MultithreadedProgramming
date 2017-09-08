@@ -7,4 +7,6 @@
 
 #define SOCKET int
 
+#define BUFFER_SIZE 8192
+
 #endif //HTTPSERVER_COMMON_H
