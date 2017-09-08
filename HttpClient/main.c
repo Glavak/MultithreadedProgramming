@@ -36,7 +36,7 @@ int main(int argc, const char *argv[])
     *path = '\0';
     path++;
 
-    SOCKET serverSocket = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    SOCKET serverSocket = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
     if (serverSocket < 0)
     {
         perror("main");
@@ -165,6 +165,8 @@ int main(int argc, const char *argv[])
 
     char buff;
     read(fileno(stdin), &buff, 1);
+
+    close(serverSocket);
 
     return 0;
 }
