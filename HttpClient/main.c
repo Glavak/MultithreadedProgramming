@@ -6,6 +6,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <string.h>
+#include <stdlib.h>
 
 #define SOCKET int
 
@@ -19,6 +20,7 @@ struct sockaddr_in getServerAddress(char *ip, uint16_t port)
     if (inet_pton(AF_INET, ip, &result.sin_addr) <= 0)
     {
         perror("getServerAddress");
+        exit(1);
     }
 
     return result;
@@ -36,7 +38,7 @@ int main(int argc, const char *argv[])
     *path = '\0';
     path++;
 
-    SOCKET serverSocket = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    SOCKET serverSocket = socket(AF_INET, SOCK_STREAM, 0);
     if (serverSocket < 0)
     {
         perror("main");
@@ -45,14 +47,8 @@ int main(int argc, const char *argv[])
     struct sockaddr_in address = getServerAddress(host, 80);
     if (connect(serverSocket, (struct sockaddr *) &address, sizeof(address)) < 0)
     {
-        if (errno == EINPROGRESS)
-        {
-            printf("Connecting to server started\n");
-        }
-        else
-        {
-            perror("main");
-        }
+        perror("main");
+        return 1;
     }
 
     char recievedText[65500];

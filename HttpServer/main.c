@@ -13,7 +13,7 @@
 
 SOCKET initializeListenSocket(struct sockaddr_in listenAddress)
 {
-    SOCKET listenSocket = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    SOCKET listenSocket = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (listenSocket < 0)
     {
         log_error("initializeListenSocket", "can't create socket");
@@ -35,7 +35,7 @@ SOCKET initializeListenSocket(struct sockaddr_in listenAddress)
 
 SOCKET initializeServerSocket(struct sockaddr_in address)
 {
-    SOCKET clientSocket = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    SOCKET clientSocket = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (clientSocket < 0)
     {
         log_error("initializeServerSocket", "can't create socket");
@@ -92,24 +92,13 @@ int main(int argc, const char *argv[])
 
     readArgs(argc, argv, &localPort, &serverIp, &serverPort);
 
-    struct connection activeConnections[200];
+    struct connection activeConnections[1024];
     size_t connectionsCount = 0;
     SOCKET listenSocket = initializeListenSocket(getListenAddress(localPort));
+    struct sockaddr_in address = getServerAddress(serverIp, serverPort);
 
     while (1)
     {
-        SOCKET connectedSocket = accept(listenSocket, (struct sockaddr *) NULL, NULL);
-        if (connectedSocket != -1)
-        {
-            printf("Accepted!\n");
-            SOCKET serverSocket = initializeServerSocket(getServerAddress(serverIp, serverPort));
-
-            activeConnections[connectionsCount].clientSocket = connectedSocket;
-            activeConnections[connectionsCount].serverSocket = serverSocket;
-            activeConnections[connectionsCount].connectionStatus = CS_CONNECTING_TO_SERVER;
-            connectionsCount++;
-        }
-
         struct pollfd fds[200];
         for (int i = 0; i < connectionsCount; ++i)
         {
@@ -132,7 +121,10 @@ int main(int argc, const char *argv[])
             }
         }
 
-        int polled = poll(fds, connectionsCount * 2, 1000 * 2);
+        fds[connectionsCount * 2].fd = listenSocket;
+        fds[connectionsCount * 2].events = POLLIN;
+
+        int polled = poll(fds, connectionsCount * 2 + 1, 1000 * 2);
         if (polled < 0)
         {
             log_error("eventLoop", "polling error");
@@ -188,6 +180,18 @@ int main(int argc, const char *argv[])
                     }
                     break;
             }
+        }
+
+        if (fds[connectionsCount * 2].revents == POLLIN)
+        {
+            printf("Accepted!\n");
+            SOCKET serverSocket = initializeServerSocket(address);
+
+            SOCKET connectedSocket = accept(listenSocket, (struct sockaddr *) NULL, NULL);
+            activeConnections[connectionsCount].clientSocket = connectedSocket;
+            activeConnections[connectionsCount].serverSocket = serverSocket;
+            activeConnections[connectionsCount].connectionStatus = CS_CONNECTING_TO_SERVER;
+            connectionsCount++;
         }
     }
 }
