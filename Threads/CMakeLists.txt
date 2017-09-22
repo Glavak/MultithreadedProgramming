@@ -3,7 +3,7 @@ project(Threads)
 
 set(CMAKE_C_STANDARD 99)
 
-set(CMAKE_C_FLAGS -pthread)
+set(CMAKE_C_FLAGS -pthread )
 
 add_executable(Threads1-2 main1-2.c)
 add_executable(Threads3 main3.c)

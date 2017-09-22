@@ -13,16 +13,16 @@ void * deathrattle(void * arg)
 
 void * routine(void * arg)
 {
-    pthread_cleanup_push(deathrattle, NULL);
+    pthread_cleanup_push(deathrattle, NULL) ;
 
-    for (int i = 0; i < 10; ++i)
-    {
-        printf("Child %d\n", i+1);
-        sleep(1);
-    }
+            for (int i = 0; i < 10; ++i)
+            {
+                printf("Child %d\n", i + 1);
+                sleep(1);
+            }
 
-    pthread_exit(0);
     pthread_cleanup_pop(0);
+    pthread_exit(0);
 }
 
 int main()
@@ -34,7 +34,10 @@ int main()
 
     sleep(2);
 
-    pthread_cancel(thread);
+    if (pthread_cancel(thread))
+    {
+        printf("error\n");
+    }
 
     sleep(2);
 }

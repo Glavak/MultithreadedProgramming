@@ -6,10 +6,12 @@ void * routine(void * arg)
 {
     for (int i = 0; i < 10; ++i)
     {
-        printf("Child %d\n", i+1);
-        sleep(1);
+        //printf("Child %d\n", i+1);
+
+        write(2, "Child\n",6);
     }
-    pthread_exit(0);
+
+    return 0;
 }
 
 int main()
@@ -19,11 +21,13 @@ int main()
 
     pthread_create(&thread, NULL, routine, NULL);
 
-    pthread_join(thread, &status);
+    int a = pthread_join(thread, &status);
 
     for (int i = 0; i < 10; ++i)
     {
-        printf("Parent %d\n", i+1);
-        sleep(1);
+        //printf("Parent %d\n", i+1);
+        write(2, "Paren\n",6);
     }
+
+    fprintf(stderr, "%d\n", status);
 }
