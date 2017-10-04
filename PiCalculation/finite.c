@@ -16,7 +16,7 @@ void * routine(struct job * job)
     unsigned int last = job->lastIteration;
     free(job);
 
-    printf("Calc [%d; %d]\n", first, last);
+    //printf("Calc [%d; %d]\n", first, last);
 
     for (int i = first; i <= last; ++i)
     {

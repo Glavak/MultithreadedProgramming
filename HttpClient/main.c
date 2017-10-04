@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <stdlib.h>
+#include <aio.h>
 
 #define SOCKET int
 
@@ -57,41 +58,30 @@ int main(int argc, const char *argv[])
     int totalNewLinesPrinted = 0;
     int lineStartPosition = 0;
 
-    fd_set rfds;
-    fd_set wfds;
-    fd_set efds;
-    FD_ZERO(&efds);
-
     struct timeval tv;
     tv.tv_sec = 1;
     tv.tv_usec = 0;
 
-    while (1)
-    {
-        FD_ZERO(&rfds);
-        FD_ZERO(&wfds);
-        FD_SET(serverSocket, &wfds);
-
-        select(serverSocket + 1, &rfds, &wfds, &efds, &tv);
-
-        if (FD_ISSET(serverSocket, &wfds))
-        {
-            printf("Sending request..\n");
-            char text[1024];
-            sprintf(text,
-                    "GET /%s HTTP/1.1\r\nHost: %s\r\nAccept: */*\r\nAccept-Encoding: utf8\r\nAccept-Language: en-US,en;q=0.8,ru;q=0.6\r\n\r\n",
-                    path, host);
-            write(serverSocket, text, strlen(text));
-            break;
-        }
-    }
+    printf("Sending request..\n");
+    char text[1024];
+    sprintf(text,
+            "GET /%s HTTP/1.1\r\nHost: %s\r\nAccept: */*\r\nAccept-Encoding: utf8\r\nAccept-Language: en-US,en;q=0.8,ru;q=0.6\r\n\r\n",
+            path, host);
+    write(serverSocket, text, strlen(text));
 
     printf("Reading response..\n");
 
     int promptPrinted = 0;
+    struct aiocb aiocb;
+
+    memset(&aiocb, 0, sizeof(struct aiocb));
 
     while (1)
     {
+        aiocb.aio_buf = recievedText + totalTextStored;
+        aiocb.aio_nbytes = 1024;
+        aiocb.aio_fildes = serverSocket;
+
         FD_ZERO(&rfds);
         FD_ZERO(&wfds);
         FD_SET(fileno(stdin), &rfds);

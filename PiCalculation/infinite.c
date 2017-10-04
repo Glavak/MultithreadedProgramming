@@ -102,13 +102,13 @@ int main(int argc, char ** argv)
         }
     }
 
-    pthread_barrier_init(&mybarrier, NULL, threadsCount);
 
     signal(SIGINT, intHandler);
-
     printf("Press Ctrl+C to stop counting and print result\n");
 
+    pthread_barrier_init(&mybarrier, NULL, threadsCount);
     double pi = getPi(threadsCount);
+    pthread_barrier_destroy(&mybarrier);
 
     printf("Pi ~ %.15g\n", pi);
 

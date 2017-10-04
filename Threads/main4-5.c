@@ -3,8 +3,11 @@
 //
 
 #include <stdio.h>
+#include <math.h>
 #include <pthread.h>
 #include <unistd.h>
+
+int counter = 0;
 
 void * deathrattle(void * arg)
 {
@@ -15,14 +18,18 @@ void * routine(void * arg)
 {
     pthread_cleanup_push(deathrattle, NULL) ;
 
-            for (int i = 0; i < 10; ++i)
+            while (1)
             {
-                printf("Child %d\n", i + 1);
-                sleep(1);
+                int a = 0;
+                for (int j = 0; j < 10000; ++j)
+                {
+                    a += sin(j);
+                }
+                counter++;
+                printf("Child %d\n", counter);
             }
 
     pthread_cleanup_pop(0);
-    pthread_exit(0);
 }
 
 int main()
@@ -39,5 +46,11 @@ int main()
         printf("error\n");
     }
 
-    sleep(2);
+    for (int i = 0; i < 10; ++i)
+    {
+        //printf("Parent %d\n", counter);
+        sleep(1);
+    }
+
+    pthread_join(thread, NULL);
 }
