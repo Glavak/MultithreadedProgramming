@@ -59,6 +59,8 @@ int main()
         pthread_mutex_unlock(&parent_mutex[i]);
     }
 
+    sleep(100);
+
     pthread_join(thread, NULL);
 
     for (int i = 0; i < PRINTS; ++i)

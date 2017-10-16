@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <pthread.h>
 #include <semaphore.h>
+#include <limits.h>
 
 #define PRINTS 10
 
