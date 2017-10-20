@@ -10,7 +10,8 @@
 enum entryStatus
 {
     ES_DOWNLOADING,
-    ES_VALID
+    ES_VALID,
+    ES_INVALID
 };
 
 struct cacheEntry
@@ -18,7 +19,6 @@ struct cacheEntry
     char * url;
     char * data;
     size_t dataCount;
-    size_t dataCapacity;
     enum entryStatus entryStatus;
 };
 

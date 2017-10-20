@@ -31,6 +31,9 @@ struct connection
 
     long left_to_download;
 
+    int cacheEntryIndex;
+    size_t cacheBytesWritten;
+
     int trackingId;
 };
 

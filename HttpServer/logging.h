@@ -5,7 +5,7 @@
 #ifndef HTTPSERVER_LOGGING_H
 #define HTTPSERVER_LOGGING_H
 
-#define LOGGING_LEVEL LL_INFO
+#define LOGGING_LEVEL LL_VERBOSE
 
 enum loggingLevels
 {

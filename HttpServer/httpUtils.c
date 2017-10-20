@@ -125,3 +125,43 @@ long getContentLengthFromData(char * httpData, size_t dataLength)
         }
     }
 }
+
+int isMethodHasPayload(char * method)
+{
+    if (method[0] == 'G' &&
+        method[1] == 'E' &&
+        method[2] == 'T')
+    {
+        return 0;
+    }
+
+    if (method[0] == 'H' &&
+        method[1] == 'E' &&
+        method[2] == 'A' &&
+        method[2] == 'D')
+    {
+        return 0;
+    }
+
+    return 1;
+}
+
+int isResponseHasPayload(int statusCode)
+{
+    if (statusCode == 204)
+    {
+        return 0;
+    }
+
+    if (statusCode == 304)
+    {
+        return 0;
+    }
+
+    if (statusCode >= 100 && statusCode < 200)
+    {
+        return 0;
+    }
+
+    return 1;
+}

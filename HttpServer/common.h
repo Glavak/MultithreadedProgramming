@@ -9,4 +9,6 @@
 
 #define BUFFER_SIZE 8192
 
+#define WRITE_BY 64
+
 #endif //HTTPSERVER_COMMON_H

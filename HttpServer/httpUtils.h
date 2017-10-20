@@ -23,4 +23,8 @@ int getResponseCodeFromData(char * httpData);
 // -1 if no Content-Length header found (yet?)
 long getContentLengthFromData(char * httpData, size_t dataLength);
 
+int isMethodHasPayload(char * method);
+
+int isResponseHasPayload(int statusCode);
+
 #endif //HTTPSERVER_HTTPUTILS_H
