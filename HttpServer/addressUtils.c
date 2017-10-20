@@ -50,10 +50,9 @@ int getIpByHostname(char * hostname, char * ip)
 
     addr_list = (struct in_addr **) he->h_addr_list;
 
-    for (i = 0; addr_list[i] != NULL; i++)
+    if (addr_list[0] != NULL)
     {
-        //Return the first one;
-        strcpy(ip, inet_ntoa(*addr_list[i]));
+        strcpy(ip, inet_ntoa(*addr_list[0]));
         return 0;
     }
 

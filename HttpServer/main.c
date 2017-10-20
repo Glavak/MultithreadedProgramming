@@ -182,6 +182,20 @@ int main(int argc, const char * argv[])
                     if (fds[i * 2].revents == POLLIN)
                     {
                         ssize_t readCount = read(activeConnections[i].clientSocket, buff, BUFFER_SIZE);
+
+                        if (readCount == 0)
+                        {
+                            logg_track(LL_VERBOSE, activeConnections[i].trackingId, "Client-side socket closed");
+                            if (activeConnections[i].buffer_size > 0)
+                            {
+                                free(activeConnections[i].buffer);
+                            }
+                            close(activeConnections[i].clientSocket);
+                            activeConnections[i] = activeConnections[connectionsCount-1];
+                            connectionsCount--;
+                            break;
+                        }
+
                         logg_track(LL_VERBOSE, activeConnections[i].trackingId, "Got %zi bytes of request", readCount);
                         if (activeConnections[i].buffer_size == 0)
                         {
@@ -344,7 +358,7 @@ int main(int argc, const char * argv[])
                         }
 
                         write(activeConnections[i].clientSocket, buff, (size_t) readCount);
-                        write(1, buff, (size_t) readCount);
+                        //write(1, buff, (size_t) readCount);
                         logg_track(LL_VERBOSE, activeConnections[i].trackingId,
                                    "Forwarded %zi bytes of response\n", readCount);
 
@@ -420,7 +434,7 @@ int main(int argc, const char * argv[])
                                         cache[activeConnections[i].cacheEntryIndex].entryStatus = ES_INVALID;
                                         activeConnections[i].cacheEntryIndex = -1;
 
-                                        if(!isResponseHasPayload(statusCode))
+                                        if (!isResponseHasPayload(statusCode))
                                         {
                                             logg_track(LL_INFO, activeConnections[i].trackingId,
                                                        "Transmission over, no payload for %d response", statusCode);
