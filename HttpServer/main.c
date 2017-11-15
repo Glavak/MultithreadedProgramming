@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <string.h>
 #include <time.h>
+#include <pthread.h>
 #include "logging.h"
 #include "addressUtils.h"
 #include "common.h"
@@ -17,7 +18,7 @@
 
 SOCKET initializeListenSocket(struct sockaddr_in listenAddress)
 {
-    SOCKET listenSocket = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    SOCKET listenSocket = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (listenSocket < 0)
     {
         logg(LL_ERROR, "initializeListenSocket", "can't create socket");
@@ -103,16 +104,422 @@ void readArgs(int argc, const char * argv[], uint16_t * outLocalPort)
     *outLocalPort = (uint16_t) localPort;
 }
 
-static struct connection activeConnections[1024];
 static struct cacheEntry cache[1024];
-static size_t connectionsCount = 0;
 static size_t cacheSize = 0;
 static SOCKET listenSocket;
 
 static void exit_handler(void)
 {
     close(listenSocket);
-    // TODO close activeConnections sockets
+}
+
+void * thread_exit_handler(struct connection * connection)
+{
+    printf("Terminated\n");
+}
+
+void * handleConnection(struct connection * connection)
+{
+    logg_track(LL_INFO, connection->trackingId, "Thread started");
+
+
+    struct pollfd fds[2];
+    char buff[BUFFER_SIZE];
+
+    fds[0].fd = connection->clientSocket;
+    fds[1].fd = connection->serverSocket;
+
+    while (1)
+    {
+        switch (connection->connectionStatus)
+        {
+            case CS_GETTING_REQUEST:
+                fds[0].events = POLLIN;
+                fds[1].events = 0;
+                break;
+
+            case CS_CONNECTING_TO_SERVER:
+                fds[0].events = 0;
+                fds[1].events = POLLOUT;
+                break;
+            case CS_WRITING_REQUEST:
+                fds[0].events = 0;
+                fds[1].events = POLLOUT;
+                break;
+            case CS_FORWARDING_REQUEST:
+                fds[0].events = POLLIN;
+                fds[1].events = POLLOUT;
+                break;
+            case CS_FORWARDING_RESPONSE:
+                fds[0].events = POLLOUT;
+                fds[1].events = POLLIN;
+                break;
+
+            case CS_RESPONDING_FROM_CACHE:
+                fds[0].events = POLLOUT;
+                fds[1].events = 0;
+                break;
+        }
+
+        int polled = poll(fds, 2, 1000 * 2);
+
+        if (polled < 0)
+        {
+            logg(LL_ERROR, "eventLoop", "polling error");
+        }
+
+        if (polled == 0)
+        {
+            continue;
+        }
+
+        switch (connection->connectionStatus)
+        {
+            case CS_GETTING_REQUEST:
+                if (fds[0].revents & POLLHUP)
+                {
+                    logg_track(LL_VERBOSE, connection->trackingId, "Client-side socket closed");
+                    if (connection->buffer_size > 0)
+                    {
+                        free(connection->buffer);
+                    }
+                    close(connection->clientSocket);
+
+                    return NULL;
+                }
+                else if (fds[0].revents & POLLIN)
+                {
+                    logg_track(LL_VERBOSE, connection->trackingId, "Getting request");
+                    ssize_t readCount = read(connection->clientSocket, buff, BUFFER_SIZE);
+                    logg_track(LL_VERBOSE, connection->trackingId, "Got request");
+
+                    if (readCount == 0)
+                    {
+                        logg_track(LL_VERBOSE, connection->trackingId, "Client-side socket closed");
+                        if (connection->buffer_size > 0)
+                        {
+                            free(connection->buffer);
+                        }
+                        close(connection->clientSocket);
+
+                        return NULL;
+                    }
+
+                    logg_track(LL_VERBOSE, connection->trackingId, "Got %zi bytes of request", readCount);
+                    if (connection->buffer_size == 0)
+                    {
+                        connection->buffer_size = (size_t) readCount;
+                        connection->buffer = malloc(readCount * sizeof(char));
+                    }
+                    else
+                    {
+                        connection->buffer_size += (size_t) readCount;
+                        connection->buffer = realloc(connection->buffer,
+                                                     connection->buffer_size);
+                    }
+                    char * dest = connection->buffer + connection->buffer_size - readCount;
+                    memcpy(dest, buff, (size_t) readCount);
+
+                    if (connection->buffer_size > 3)
+                    {
+                        char * url = getUrlFromData(connection->buffer,
+                                                    connection->buffer_size);
+                        if (url != NULL)
+                        {
+                            if (!isMethodGet(connection->buffer))
+                            {
+                                logg_track(LL_WARNING, connection->trackingId,
+                                           "Only GET methods allowed, connection dropped");
+
+                                close(connection->clientSocket);
+                                free(connection->buffer);
+                                free(url);
+
+                                return NULL;
+                            }
+                            else
+                            {
+                                int foundInCache = 0;
+                                for (int j = 0; j < cacheSize; ++j)
+                                {
+                                    if (strcmp(cache[j].url, url) == 0)
+                                    {
+                                        if (cache[j].entryStatus == ES_VALID)
+                                        {
+                                            logg_track(LL_VERBOSE, connection->trackingId,
+                                                       "Found cache entry for %s, responding from cache", url);
+
+                                            free(connection->buffer);
+
+                                            connection->cacheEntryIndex = j;
+                                            connection->cacheBytesWritten = 0;
+                                            connection->connectionStatus = CS_RESPONDING_FROM_CACHE;
+                                        }
+                                        else if (cache[j].entryStatus == ES_DOWNLOADING)
+                                        {
+                                            logg_track(LL_VERBOSE, connection->trackingId,
+                                                       "Found not finished cache entry for %s, responding from server",
+                                                       url);
+
+                                            connection->cacheEntryIndex = -1; // Do not save to cache, as other client already working on it
+                                            connection->connectionStatus = CS_CONNECTING_TO_SERVER;
+                                            connection->serverSocket = initServerSocketToUrl(url);
+                                            editRequestToSendToServer(connection);
+                                        }
+                                        else
+                                        {
+                                            continue;
+                                        }
+
+                                        foundInCache = 1;
+                                        free(url);
+                                        break;
+                                    }
+                                }
+
+                                if (!foundInCache)
+                                {
+                                    logg_track(LL_VERBOSE, connection->trackingId,
+                                               "Cache entry for %s not found, responding from server", url);
+
+                                    cache[cacheSize].url = url;
+                                    cache[cacheSize].entryStatus = ES_DOWNLOADING;
+                                    cache[cacheSize].dataCount = 0;
+                                    cacheSize++;
+
+                                    connection->cacheEntryIndex = (int) (cacheSize - 1);
+                                    connection->connectionStatus = CS_CONNECTING_TO_SERVER;
+                                    connection->serverSocket = initServerSocketToUrl(url);
+                                    editRequestToSendToServer(connection);
+                                }
+                            }
+                        }
+                    }
+                }
+                break;
+
+            case CS_CONNECTING_TO_SERVER:
+                if (fds[1].revents & POLLOUT)
+                {
+                    connection->connectionStatus = CS_WRITING_REQUEST;
+                }
+                break;
+            case CS_WRITING_REQUEST:
+                if (fds[1].revents & POLLOUT)
+                {
+                    logg_track(LL_VERBOSE, connection->trackingId,
+                               "Writing %zu bytes", connection->buffer_size);
+                    write(connection->serverSocket, connection->buffer,
+                          connection->buffer_size);
+                    //write(1, connection->buffer, connection->buffer_size);
+                    logg_track(LL_VERBOSE, connection->trackingId,
+                               "Wrote %zu bytes", connection->buffer_size);
+
+                    if (connection->buffer[connection->buffer_size - 3] == '\n' &&
+                        connection->buffer[connection->buffer_size - 1] == '\n')
+                    {
+                        connection->buffer_size = 0;
+                        connection->left_to_download = -1;
+                        connection->connectionStatus = CS_FORWARDING_RESPONSE;
+                    }
+                    else
+                    {
+                        connection->connectionStatus = CS_FORWARDING_REQUEST;
+                    }
+                }
+                break;
+            case CS_FORWARDING_REQUEST:
+                if (fds[0].revents & POLLIN && fds[1].revents & POLLOUT)
+                {
+                    logg_track(LL_VERBOSE, connection->trackingId, "Reading request");
+                    ssize_t readCount = read(connection->clientSocket, buff, BUFFER_SIZE);
+                    if (readCount > 0)
+                    {
+                        logg_track(LL_VERBOSE, connection->trackingId,
+                                   "Forwarding %zi  bytes of request", readCount);
+                        write(connection->serverSocket, buff, (size_t) readCount);
+                        logg_track(LL_VERBOSE, connection->trackingId,
+                                   "Forwarded %zi bytes of request", readCount);
+                    }
+
+                    if (buff[readCount - 3] == '\n' &&
+                        buff[readCount - 1] == '\n')
+                    {
+                        connection->buffer_size = 0;
+                        connection->left_to_download = -1;
+                        connection->connectionStatus = CS_FORWARDING_RESPONSE;
+                    }
+                }
+                break;
+            case CS_FORWARDING_RESPONSE:
+                if (fds[0].revents & POLLOUT && fds[1].revents & POLLIN)
+                {
+                    logg_track(LL_VERBOSE, connection->trackingId, "Reading response");
+                    ssize_t readCount = read(connection->serverSocket, buff, BUFFER_SIZE);
+                    if (readCount == 0)
+                    {
+                        logg_track(LL_INFO, connection->trackingId, "Transmission over, socket closed");
+                        if (connection->cacheEntryIndex != -1)
+                        {
+                            cache[connection->cacheEntryIndex].entryStatus = ES_VALID;
+                        }
+
+                        free(connection->buffer);
+                        close(connection->clientSocket);
+                        close(connection->serverSocket);
+
+                        return NULL;
+                    }
+
+                    logg_track(LL_VERBOSE, connection->trackingId,
+                               "Forwarding %zi  bytes of response", readCount);
+                    write(connection->clientSocket, buff, (size_t) readCount);
+                    write(1, buff, (size_t) readCount);
+                    logg_track(LL_VERBOSE, connection->trackingId,
+                               "Forwarded %zi bytes of response\n", readCount);
+
+                    if (connection->cacheEntryIndex != -1)
+                    {
+                        struct cacheEntry * entry = &cache[connection->cacheEntryIndex];
+
+                        entry->dataCount += (size_t) readCount;
+                        entry->data = realloc(entry->data,
+                                              entry->dataCount);
+
+                        char * dest = entry->data + entry->dataCount - readCount;
+
+                        memcpy(dest, buff, (size_t) readCount);
+                    }
+
+                    if (connection->left_to_download == -1)
+                    {
+                        connection->buffer_size += (size_t) readCount;
+                        connection->buffer = realloc(connection->buffer,
+                                                     connection->buffer_size);
+
+                        char * dest = connection->buffer + connection->buffer_size - readCount;
+
+                        memcpy(dest, buff, (size_t) readCount);
+
+                        for (int j = 0; j < connection->buffer_size - 2; ++j)
+                        {
+                            if (connection->buffer[j] == '\n' &&
+                                connection->buffer[j + 2] == '\n')
+                            {
+                                int statusCode = getResponseCodeFromData(connection->buffer);
+                                long contentLength = getContentLengthFromData(connection->buffer,
+                                                                              connection->buffer_size);
+
+                                logg_track(LL_INFO, connection->trackingId,
+                                           "Response headers acquired, response code: %d, Content-Length: %li",
+                                           statusCode, contentLength);
+
+                                if (contentLength != -1)
+                                {
+                                    if (statusCode != 200)
+                                    {
+                                        free(cache[connection->cacheEntryIndex].data);
+                                        cache[connection->cacheEntryIndex].entryStatus = ES_INVALID;
+                                        connection->cacheEntryIndex = -1;
+                                    }
+
+                                    connection->left_to_download =
+                                            contentLength - connection->buffer_size + (j + 3);
+
+                                    free(connection->buffer);
+                                    connection->buffer_size = 0;
+
+                                    if (connection->left_to_download <= 0)
+                                    {
+                                        logg_track(LL_INFO, connection->trackingId,
+                                                   "Transmission over, Content-Length reached");
+                                        if (connection->cacheEntryIndex != -1)
+                                        {
+                                            cache[connection->cacheEntryIndex].entryStatus = ES_VALID;
+                                        }
+                                        close(connection->clientSocket);
+                                        close(connection->serverSocket);
+
+                                        return NULL;
+                                    }
+                                }
+                                else
+                                {
+                                    free(cache[connection->cacheEntryIndex].data);
+                                    cache[connection->cacheEntryIndex].entryStatus = ES_INVALID;
+                                    connection->cacheEntryIndex = -1;
+
+                                    if (!isResponseHasPayload(statusCode))
+                                    {
+                                        logg_track(LL_INFO, connection->trackingId,
+                                                   "Transmission over, no payload for %d response", statusCode);
+                                        free(connection->buffer);
+                                        close(connection->clientSocket);
+                                        close(connection->serverSocket);
+
+                                        return NULL;
+                                    }
+                                }
+
+                                break;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        connection->left_to_download -= readCount;
+                        if (connection->left_to_download <= 0)
+                        {
+                            logg_track(LL_INFO, connection->trackingId,
+                                       "Transmission over, Content-Length reached");
+                            if (connection->cacheEntryIndex != -1)
+                            {
+                                cache[connection->cacheEntryIndex].entryStatus = ES_VALID;
+                            }
+
+                            close(connection->clientSocket);
+                            close(connection->serverSocket);
+
+                            return NULL;
+                        }
+                    }
+                }
+                break;
+
+            case CS_RESPONDING_FROM_CACHE:
+                if (fds[0].revents & POLLOUT)
+                {
+                    struct cacheEntry entry = cache[connection->cacheEntryIndex];
+
+                    char * sendData = entry.data + connection->cacheBytesWritten;
+                    size_t bytesToWrite = entry.dataCount - connection->cacheBytesWritten;
+                    if (bytesToWrite > WRITE_BY)
+                    {
+                        bytesToWrite = WRITE_BY;
+                    }
+
+                    logg_track(LL_VERBOSE, connection->trackingId,
+                               "Responding from cache %d bytes", bytesToWrite);
+                    ssize_t bytesWritten = write(connection->clientSocket, sendData, bytesToWrite);
+                    //write(1, sendData, bytesToWrite);
+
+                    logg_track(LL_VERBOSE, connection->trackingId,
+                               "Wrote %zi bytes from cache", bytesWritten);
+
+                    connection->cacheBytesWritten += bytesWritten;
+                    if (connection->cacheBytesWritten >= entry.dataCount)
+                    {
+                        logg_track(LL_INFO, connection->trackingId,
+                                   "Transmission over, responded from cache");
+                        close(connection->clientSocket);
+                        close(connection->serverSocket);
+
+                        return NULL;
+                    }
+                }
+                break;
+        }
+    }
 }
 
 int main(int argc, const char * argv[])
@@ -124,434 +531,29 @@ int main(int argc, const char * argv[])
     srand((unsigned int) time(NULL));
 
     listenSocket = initializeListenSocket(getListenAddress(localPort));
-    logg(LL_INFO, NULL, "Server started\n");
+    logg(LL_INFO, NULL, "Server started");
 
     while (1)
     {
-        struct pollfd fds[200];
-        for (int i = 0; i < connectionsCount; ++i)
+        logg(LL_VERBOSE, "accept", "Accepting request..");
+        SOCKET connectedSocket = accept(listenSocket, (struct sockaddr *) NULL, NULL);
+
+        if (connectedSocket != NULL)
         {
-            fds[i * 2].fd = activeConnections[i].clientSocket;
-            fds[i * 2 + 1].fd = activeConnections[i].serverSocket;
-            switch (activeConnections[i].connectionStatus)
-            {
-                case CS_GETTING_REQUEST:
-                    fds[i * 2].events = POLLIN;
-                    fds[i * 2 + 1].events = 0;
-                    break;
+            logg(LL_VERBOSE, "accept", "Accepted");
 
-                case CS_CONNECTING_TO_SERVER:
-                    fds[i * 2].events = 0;
-                    fds[i * 2 + 1].events = POLLOUT;
-                    break;
-                case CS_WRITING_REQUEST:
-                    fds[i * 2].events = 0;
-                    fds[i * 2 + 1].events = POLLOUT;
-                    break;
-                case CS_FORWARDING_REQUEST:
-                    fds[i * 2].events = POLLIN;
-                    fds[i * 2 + 1].events = POLLOUT;
-                    break;
-                case CS_FORWARDING_RESPONSE:
-                    fds[i * 2].events = POLLOUT;
-                    fds[i * 2 + 1].events = POLLIN;
-                    break;
+            struct connection * connection = malloc(sizeof(struct connection));
 
-                case CS_RESPONDING_FROM_CACHE:
-                    fds[i * 2].events = POLLOUT;
-                    fds[i * 2 + 1].events = 0;
-                    break;
-            }
-        }
+            connection->clientSocket = connectedSocket;
+            connection->buffer_size = 0;
+            connection->connectionStatus = CS_GETTING_REQUEST;
+            connection->trackingId = rand() % 9000 + 1000;
 
-        fds[connectionsCount * 2].fd = listenSocket;
-        fds[connectionsCount * 2].events = POLLIN;
+            logg_track(LL_INFO, connection->trackingId, "Accepted incoming connection");
 
-        int polled = poll(fds, connectionsCount * 2 + 1, 1000 * 2);
-        if (polled < 0)
-        {
-            logg(LL_ERROR, "eventLoop", "polling error");
-        }
 
-        if (polled == 0)
-        {
-            continue;
-        }
-
-        //logg(LL_VERBOSE, "eventLoop", "Polled %d sockets, %d activeConnections", polled, connectionsCount);
-
-        char buff[BUFFER_SIZE];
-        for (int i = 0; i < connectionsCount; ++i)
-        {
-            switch (activeConnections[i].connectionStatus)
-            {
-                case CS_GETTING_REQUEST:
-                    if (fds[i * 2].revents & POLLHUP)
-                    {
-                        logg_track(LL_VERBOSE, activeConnections[i].trackingId, "Client-side socket closed");
-                        if (activeConnections[i].buffer_size > 0)
-                        {
-                            free(activeConnections[i].buffer);
-                        }
-                        close(activeConnections[i].clientSocket);
-                        activeConnections[i] = activeConnections[connectionsCount - 1];
-                        connectionsCount--;
-                    }
-                    else if (fds[i * 2].revents & POLLIN)
-                    {
-                        logg_track(LL_VERBOSE, activeConnections[i].trackingId, "Getting request");
-                        ssize_t readCount = read(activeConnections[i].clientSocket, buff, BUFFER_SIZE);
-                        logg_track(LL_VERBOSE, activeConnections[i].trackingId, "Got request");
-
-                        if (readCount == 0)
-                        {
-                            logg_track(LL_VERBOSE, activeConnections[i].trackingId, "Client-side socket closed");
-                            if (activeConnections[i].buffer_size > 0)
-                            {
-                                free(activeConnections[i].buffer);
-                            }
-                            close(activeConnections[i].clientSocket);
-                            activeConnections[i] = activeConnections[connectionsCount - 1];
-                            connectionsCount--;
-                            break;
-                        }
-
-                        logg_track(LL_VERBOSE, activeConnections[i].trackingId, "Got %zi bytes of request", readCount);
-                        if (activeConnections[i].buffer_size == 0)
-                        {
-                            activeConnections[i].buffer_size = (size_t) readCount;
-                            activeConnections[i].buffer = malloc(readCount * sizeof(char));
-                        }
-                        else
-                        {
-                            activeConnections[i].buffer_size += (size_t) readCount;
-                            activeConnections[i].buffer = realloc(activeConnections[i].buffer,
-                                                                  activeConnections[i].buffer_size);
-                        }
-                        char * dest = activeConnections[i].buffer + activeConnections[i].buffer_size - readCount;
-                        memcpy(dest, buff, (size_t) readCount);
-
-                        if (activeConnections[i].buffer_size > 3)
-                        {
-                            char * url = getUrlFromData(activeConnections[i].buffer,
-                                                        activeConnections[i].buffer_size);
-                            if (url != NULL)
-                            {
-                                if (!isMethodGet(activeConnections[i].buffer))
-                                {
-                                    logg_track(LL_WARNING, activeConnections[i].trackingId,
-                                               "Only GET methods allowed, connection dropped");
-
-                                    close(activeConnections[i].clientSocket);
-                                    free(activeConnections[i].buffer);
-                                    free(url);
-                                    activeConnections[i] = activeConnections[connectionsCount - 1];
-                                    connectionsCount--;
-                                }
-                                else
-                                {
-                                    int foundInCache = 0;
-                                    for (int j = 0; j < cacheSize; ++j)
-                                    {
-                                        if (strcmp(cache[j].url, url) == 0)
-                                        {
-                                            if (cache[j].entryStatus == ES_VALID)
-                                            {
-                                                logg_track(LL_VERBOSE, activeConnections[i].trackingId,
-                                                           "Found cache entry for %s, responding from cache", url);
-
-                                                free(activeConnections[i].buffer);
-
-                                                activeConnections[i].cacheEntryIndex = j;
-                                                activeConnections[i].cacheBytesWritten = 0;
-                                                activeConnections[i].connectionStatus = CS_RESPONDING_FROM_CACHE;
-                                            }
-                                            else if (cache[j].entryStatus == ES_DOWNLOADING)
-                                            {
-                                                logg_track(LL_VERBOSE, activeConnections[i].trackingId,
-                                                           "Found not finished cache entry for %s, responding from server",
-                                                           url);
-
-                                                activeConnections[i].cacheEntryIndex = -1; // Do not save to cache, as other client already working on it
-                                                activeConnections[i].connectionStatus = CS_CONNECTING_TO_SERVER;
-                                                activeConnections[i].serverSocket = initServerSocketToUrl(url);
-                                                editRequestToSendToServer(&activeConnections[i]);
-                                            }
-                                            else
-                                            {
-                                                continue;
-                                            }
-
-                                            foundInCache = 1;
-                                            free(url);
-                                            break;
-                                        }
-                                    }
-
-                                    if (!foundInCache)
-                                    {
-                                        logg_track(LL_VERBOSE, activeConnections[i].trackingId,
-                                                   "Cache entry for %s not found, responding from server", url);
-
-                                        cache[cacheSize].url = url;
-                                        cache[cacheSize].entryStatus = ES_DOWNLOADING;
-                                        cache[cacheSize].dataCount = 0;
-                                        cacheSize++;
-
-                                        activeConnections[i].cacheEntryIndex = (int) (cacheSize - 1);
-                                        activeConnections[i].connectionStatus = CS_CONNECTING_TO_SERVER;
-                                        activeConnections[i].serverSocket = initServerSocketToUrl(url);
-                                        editRequestToSendToServer(&activeConnections[i]);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    break;
-
-                case CS_CONNECTING_TO_SERVER:
-                    if (fds[i * 2 + 1].revents & POLLOUT)
-                    {
-                        activeConnections[i].connectionStatus = CS_WRITING_REQUEST;
-                    }
-                    break;
-                case CS_WRITING_REQUEST:
-                    if (fds[i * 2 + 1].revents & POLLOUT)
-                    {
-                        logg_track(LL_VERBOSE, activeConnections[i].trackingId,
-                                   "Writing %zu bytes", activeConnections[i].buffer_size);
-                        write(activeConnections[i].serverSocket, activeConnections[i].buffer,
-                              activeConnections[i].buffer_size);
-                        //write(1, activeConnections[i].buffer, activeConnections[i].buffer_size);
-                        logg_track(LL_VERBOSE, activeConnections[i].trackingId,
-                                   "Wrote %zu bytes", activeConnections[i].buffer_size);
-
-                        if (activeConnections[i].buffer[activeConnections[i].buffer_size - 3] == '\n' &&
-                            activeConnections[i].buffer[activeConnections[i].buffer_size - 1] == '\n')
-                        {
-                            activeConnections[i].buffer_size = 0;
-                            activeConnections[i].left_to_download = -1;
-                            activeConnections[i].connectionStatus = CS_FORWARDING_RESPONSE;
-                        }
-                        else
-                        {
-                            activeConnections[i].connectionStatus = CS_FORWARDING_REQUEST;
-                        }
-                    }
-                case CS_FORWARDING_REQUEST:
-                    if (fds[i * 2].revents & POLLIN && fds[i * 2 + 1].revents & POLLOUT)
-                    {
-                        logg_track(LL_VERBOSE, activeConnections[i].trackingId, "Reading request");
-                        ssize_t readCount = read(activeConnections[i].clientSocket, buff, BUFFER_SIZE);
-                        if (readCount > 0)
-                        {
-                            logg_track(LL_VERBOSE, activeConnections[i].trackingId,
-                                       "Forwarding %zi  bytes of request", readCount);
-                            write(activeConnections[i].serverSocket, buff, (size_t) readCount);
-                            logg_track(LL_VERBOSE, activeConnections[i].trackingId,
-                                       "Forwarded %zi bytes of request", readCount);
-                        }
-
-                        if (buff[readCount - 3] == '\n' &&
-                            buff[readCount - 1] == '\n')
-                        {
-                            activeConnections[i].buffer_size = 0;
-                            activeConnections[i].left_to_download = -1;
-                            activeConnections[i].connectionStatus = CS_FORWARDING_RESPONSE;
-                        }
-                    }
-                    break;
-                case CS_FORWARDING_RESPONSE:
-                    if (fds[i * 2].revents & POLLOUT && fds[i * 2 + 1].revents & POLLIN)
-                    {
-                        logg_track(LL_VERBOSE, activeConnections[i].trackingId, "Reading response");
-                        ssize_t readCount = read(activeConnections[i].serverSocket, buff, BUFFER_SIZE);
-                        if (readCount == 0)
-                        {
-                            logg_track(LL_INFO, activeConnections[i].trackingId, "Transmission over, socket closed");
-                            if (activeConnections[i].cacheEntryIndex != -1)
-                            {
-                                cache[activeConnections[i].cacheEntryIndex].entryStatus = ES_VALID;
-                            }
-
-                            free(activeConnections[i].buffer);
-                            close(activeConnections[i].clientSocket);
-                            close(activeConnections[i].serverSocket);
-
-                            activeConnections[i] = activeConnections[connectionsCount - 1];
-                            connectionsCount--;
-                            continue;
-                        }
-
-                        logg_track(LL_VERBOSE, activeConnections[i].trackingId,
-                                   "Forwarding %zi  bytes of response", readCount);
-                        write(activeConnections[i].clientSocket, buff, (size_t) readCount);
-                        write(1, buff, (size_t) readCount);
-                        logg_track(LL_VERBOSE, activeConnections[i].trackingId,
-                                   "Forwarded %zi bytes of response\n", readCount);
-
-                        if (activeConnections[i].cacheEntryIndex != -1)
-                        {
-                            struct cacheEntry * entry = &cache[activeConnections[i].cacheEntryIndex];
-
-                            entry->dataCount += (size_t) readCount;
-                            entry->data = realloc(entry->data,
-                                                  entry->dataCount);
-
-                            char * dest = entry->data + entry->dataCount - readCount;
-
-                            memcpy(dest, buff, (size_t) readCount);
-                        }
-
-                        if (activeConnections[i].left_to_download == -1)
-                        {
-                            activeConnections[i].buffer_size += (size_t) readCount;
-                            activeConnections[i].buffer = realloc(activeConnections[i].buffer,
-                                                                  activeConnections[i].buffer_size);
-
-                            char * dest = activeConnections[i].buffer + activeConnections[i].buffer_size - readCount;
-
-                            memcpy(dest, buff, (size_t) readCount);
-
-                            for (int j = 0; j < activeConnections[i].buffer_size - 2; ++j)
-                            {
-                                if (activeConnections[i].buffer[j] == '\n' &&
-                                    activeConnections[i].buffer[j + 2] == '\n')
-                                {
-                                    int statusCode = getResponseCodeFromData(activeConnections[i].buffer);
-                                    long contentLength = getContentLengthFromData(activeConnections[i].buffer,
-                                                                                  activeConnections[i].buffer_size);
-
-                                    logg_track(LL_INFO, activeConnections[i].trackingId,
-                                               "Response headers acquired, response code: %d, Content-Length: %li",
-                                               statusCode, contentLength);
-
-                                    if (contentLength != -1)
-                                    {
-                                        if (statusCode != 200)
-                                        {
-                                            free(cache[activeConnections[i].cacheEntryIndex].data);
-                                            cache[activeConnections[i].cacheEntryIndex].entryStatus = ES_INVALID;
-                                            activeConnections[i].cacheEntryIndex = -1;
-                                        }
-
-                                        activeConnections[i].left_to_download =
-                                                contentLength - activeConnections[i].buffer_size + (j + 3);
-
-                                        free(activeConnections[i].buffer);
-                                        activeConnections[i].buffer_size = 0;
-
-                                        if (activeConnections[i].left_to_download <= 0)
-                                        {
-                                            logg_track(LL_INFO, activeConnections[i].trackingId,
-                                                       "Transmission over, Content-Length reached");
-                                            if (activeConnections[i].cacheEntryIndex != -1)
-                                            {
-                                                cache[activeConnections[i].cacheEntryIndex].entryStatus = ES_VALID;
-                                            }
-                                            close(activeConnections[i].clientSocket);
-                                            close(activeConnections[i].serverSocket);
-
-                                            activeConnections[i] = activeConnections[connectionsCount - 1];
-                                            connectionsCount--;
-                                        }
-                                    }
-                                    else
-                                    {
-                                        free(cache[activeConnections[i].cacheEntryIndex].data);
-                                        cache[activeConnections[i].cacheEntryIndex].entryStatus = ES_INVALID;
-                                        activeConnections[i].cacheEntryIndex = -1;
-
-                                        if (!isResponseHasPayload(statusCode))
-                                        {
-                                            logg_track(LL_INFO, activeConnections[i].trackingId,
-                                                       "Transmission over, no payload for %d response", statusCode);
-                                            free(activeConnections[i].buffer);
-                                            close(activeConnections[i].clientSocket);
-                                            close(activeConnections[i].serverSocket);
-
-                                            activeConnections[i] = activeConnections[connectionsCount - 1];
-                                            connectionsCount--;
-                                        }
-                                    }
-
-                                    break;
-                                }
-                            }
-                        }
-                        else
-                        {
-                            activeConnections[i].left_to_download -= readCount;
-                            if (activeConnections[i].left_to_download <= 0)
-                            {
-                                logg_track(LL_INFO, activeConnections[i].trackingId,
-                                           "Transmission over, Content-Length reached");
-                                if (activeConnections[i].cacheEntryIndex != -1)
-                                {
-                                    cache[activeConnections[i].cacheEntryIndex].entryStatus = ES_VALID;
-                                }
-
-                                close(activeConnections[i].clientSocket);
-                                close(activeConnections[i].serverSocket);
-
-                                activeConnections[i] = activeConnections[connectionsCount - 1];
-                                connectionsCount--;
-                            }
-                        }
-                    }
-                    break;
-
-                case CS_RESPONDING_FROM_CACHE:
-                    if (fds[i * 2].revents & POLLOUT)
-                    {
-                        struct cacheEntry entry = cache[activeConnections[i].cacheEntryIndex];
-
-                        char * sendData = entry.data + activeConnections[i].cacheBytesWritten;
-                        size_t bytesToWrite = entry.dataCount - activeConnections[i].cacheBytesWritten;
-                        if (bytesToWrite > WRITE_BY)
-                        {
-                            bytesToWrite = WRITE_BY;
-                        }
-
-                        logg_track(LL_VERBOSE, activeConnections[i].trackingId,
-                                   "Responding from cache %d bytes", bytesToWrite);
-                        ssize_t bytesWritten = write(activeConnections[i].clientSocket, sendData, bytesToWrite);
-                        //write(1, sendData, bytesToWrite);
-
-                        logg_track(LL_VERBOSE, activeConnections[i].trackingId,
-                                   "Wrote %zi bytes from cache", bytesWritten);
-
-                        activeConnections[i].cacheBytesWritten += bytesWritten;
-                        if (activeConnections[i].cacheBytesWritten >= entry.dataCount)
-                        {
-                            logg_track(LL_INFO, activeConnections[i].trackingId,
-                                       "Transmission over, responded from cache");
-                            close(activeConnections[i].clientSocket);
-                            close(activeConnections[i].serverSocket);
-
-                            activeConnections[i] = activeConnections[connectionsCount - 1];
-                            connectionsCount--;
-                        }
-                    }
-            }
-        }
-
-        if (fds[connectionsCount * 2].revents & POLLIN && !(fds[connectionsCount * 2].revents & POLLHUP))
-        {
-            logg(LL_VERBOSE, "accept", "Accepting request %d", (int) fds[connectionsCount * 2].revents);
-            SOCKET connectedSocket = accept(listenSocket, (struct sockaddr *) NULL, NULL);
-
-            if (connectedSocket != NULL)
-            {
-                logg(LL_VERBOSE, "accept ", "Accepted", (int) fds[connectionsCount * 2].revents);
-                activeConnections[connectionsCount].clientSocket = connectedSocket;
-                activeConnections[connectionsCount].buffer_size = 0;
-                activeConnections[connectionsCount].connectionStatus = CS_GETTING_REQUEST;
-                activeConnections[connectionsCount].trackingId = rand() % 9000 + 1000;
-                connectionsCount++;
-
-                printf("[I] [%d] Accepted incoming connection\n", activeConnections[connectionsCount - 1].trackingId);
-            }
+            pthread_t thread;
+            pthread_create(&thread, NULL, (void * (*)(void *)) handleConnection, connection);
         }
     }
 }
