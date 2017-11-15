@@ -13,53 +13,69 @@
 
 #define PHILO 5
 #define DELAY 30000
-#define FOOD 50
+#define FOOD 100
 
 pthread_mutex_t forks[PHILO];
 pthread_t phils[PHILO];
-void *philosopher (void *id);
-int food_on_table ();
-void get_fork (int, int, char *);
-void down_forks (int, int);
+
+void * philosopher(void * id);
+
+int food_on_table();
+
+void get_fork(int, int, char *);
+
+void down_forks(int, int);
+
 pthread_mutex_t foodlock;
 
 int sleep_seconds = 0;
 
 int
-main (int argn,
-      char **argv)
+main(int argn,
+     char ** argv)
 {
     int i;
 
     if (argn == 2)
-        sleep_seconds = atoi (argv[1]);
+    {
+        sleep_seconds = atoi(argv[1]);
+    }
 
-    pthread_mutex_init (&foodlock, NULL);
+    pthread_mutex_init(&foodlock, NULL);
     for (i = 0; i < PHILO; i++)
-        pthread_mutex_init (&forks[i], NULL);
+    {
+        pthread_mutex_init(&forks[i], NULL);
+    }
     for (i = 0; i < PHILO; i++)
-        pthread_create (&phils[i], NULL, philosopher, (void *)i);
+    {
+        pthread_create(&phils[i], NULL, philosopher, (void *) i);
+    }
     for (i = 0; i < PHILO; i++)
-        pthread_join (phils[i], NULL);
+    {
+        pthread_join(phils[i], NULL);
+    }
     return 0;
 }
 
 void *
-philosopher (void *num)
+philosopher(void * num)
 {
     int id;
     int left_fork, right_fork, f;
 
-    id = (int)num;
-    printf ("Philosopher %d sitting down to dinner.\n", id);
+    id = (int) num;
+    printf("Philosopher %d sitting down to dinner.\n", id);
     right_fork = id;
     left_fork = id + 1;
 
     /* Wrap around the forks. */
     if (left_fork == PHILO)
+    {
         left_fork = 0;
+    }
 
-    while (f = food_on_table ()) {
+    while (f = food_on_table())
+    {
 
         /* Thanks to philosophers #1 who would like to
          * take a nap before picking up the forks, the other
@@ -67,56 +83,76 @@ philosopher (void *num)
          * not deadlock.
          */
         if (id == 1)
-            sleep (sleep_seconds);
-
-        printf ("Philosopher %d: get dish %d.\n", id, f);
-        if(right_fork < left_fork)
         {
-            get_fork(id, right_fork, "right");
-            get_fork(id, left_fork, "left ");
-        }
-        else
-        {
-            get_fork(id, left_fork, "left ");
-            get_fork(id, right_fork, "right");
+            sleep(sleep_seconds);
         }
 
-        printf ("Philosopher %d: eating.\n", id);
-        usleep (DELAY * (FOOD - f + 1));
-        down_forks (left_fork, right_fork);
+        printf("Philosopher %d: get dish %d.\n", id, f);
+        get_forks (id, right_fork, left_fork);
+
+
+        printf("Philosopher %d: eating.\n", id);
+        usleep(DELAY * (FOOD - f + 1));
+        down_forks(left_fork, right_fork);
     }
-    printf ("Philosopher %d is done eating.\n", id);
+    printf("Philosopher %d is done eating.\n", id);
     return (NULL);
 }
 
 int
-food_on_table ()
+food_on_table()
 {
     static int food = FOOD;
     int myfood;
 
-    pthread_mutex_lock (&foodlock);
-    if (food > 0) {
+    pthread_mutex_lock(&foodlock);
+    if (food > 0)
+    {
         food--;
     }
     myfood = food;
-    pthread_mutex_unlock (&foodlock);
+    pthread_mutex_unlock(&foodlock);
     return myfood;
 }
 
+pthread_mutex_t getting_forks_mx;
+pthread_cond_t getting_forks_cond;
+
 void
-get_fork (int phil,
-          int fork,
-          char *hand)
+get_forks(int phil,
+          int fork1,
+          int fork2)
 {
-    pthread_mutex_lock (&forks[fork]);
-    printf ("Philosopher %d: got %s fork %d\n", phil, hand, fork);
+    int locked = 1;
+
+    pthread_mutex_lock(&getting_forks_mx);
+    while(locked)
+    {
+        locked = pthread_mutex_trylock(&forks[fork1]);
+        if (locked)
+        {
+            locked = pthread_mutex_trylock(&forks[fork2]);
+            if (locked)
+            {
+                pthread_mutex_unlock(&forks[fork1]);
+            }
+        }
+
+        if (locked)
+        {
+            pthread_cond_wait(&getting_forks_cond, &getting_forks_mx);
+        }
+    }
+    pthread_mutex_unlock(&getting_forks_mx);
 }
 
 void
-down_forks (int f1,
-            int f2)
+down_forks(int f1,
+           int f2)
 {
+    pthread_mutex_lock(&getting_forks_mx);
     pthread_mutex_unlock (&forks[f1]);
     pthread_mutex_unlock (&forks[f2]);
+    pthread_cond_broadcast(&getting_forks_cond);
+    pthread_mutex_unlock(&getting_forks_mx);
 }
