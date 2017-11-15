@@ -17,7 +17,7 @@
 
 SOCKET initializeListenSocket(struct sockaddr_in listenAddress)
 {
-    SOCKET listenSocket = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    SOCKET listenSocket = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     if (listenSocket < 0)
     {
         logg(LL_ERROR, "initializeListenSocket", "can't create socket");
@@ -28,7 +28,7 @@ SOCKET initializeListenSocket(struct sockaddr_in listenAddress)
         logg(LL_ERROR, "initializeListenSocket", "can't bind socket");
     }
 
-    if (listen(listenSocket, 10))
+    if (listen(listenSocket, 100))
     {
         logg(LL_ERROR, "initializeListenSocket", "can't start listening");
     }
@@ -173,15 +173,35 @@ int main(int argc, const char * argv[])
             logg(LL_ERROR, "eventLoop", "polling error");
         }
 
+        if (polled == 0)
+        {
+            continue;
+        }
+
+        //logg(LL_VERBOSE, "eventLoop", "Polled %d sockets, %d activeConnections", polled, connectionsCount);
+
         char buff[BUFFER_SIZE];
         for (int i = 0; i < connectionsCount; ++i)
         {
             switch (activeConnections[i].connectionStatus)
             {
                 case CS_GETTING_REQUEST:
-                    if (fds[i * 2].revents == POLLIN)
+                    if (fds[i * 2].revents & POLLHUP)
                     {
+                        logg_track(LL_VERBOSE, activeConnections[i].trackingId, "Client-side socket closed");
+                        if (activeConnections[i].buffer_size > 0)
+                        {
+                            free(activeConnections[i].buffer);
+                        }
+                        close(activeConnections[i].clientSocket);
+                        activeConnections[i] = activeConnections[connectionsCount - 1];
+                        connectionsCount--;
+                    }
+                    else if (fds[i * 2].revents & POLLIN)
+                    {
+                        logg_track(LL_VERBOSE, activeConnections[i].trackingId, "Getting request");
                         ssize_t readCount = read(activeConnections[i].clientSocket, buff, BUFFER_SIZE);
+                        logg_track(LL_VERBOSE, activeConnections[i].trackingId, "Got request");
 
                         if (readCount == 0)
                         {
@@ -191,7 +211,7 @@ int main(int argc, const char * argv[])
                                 free(activeConnections[i].buffer);
                             }
                             close(activeConnections[i].clientSocket);
-                            activeConnections[i] = activeConnections[connectionsCount-1];
+                            activeConnections[i] = activeConnections[connectionsCount - 1];
                             connectionsCount--;
                             break;
                         }
@@ -290,14 +310,16 @@ int main(int argc, const char * argv[])
                     break;
 
                 case CS_CONNECTING_TO_SERVER:
-                    if (fds[i * 2 + 1].revents == POLLOUT)
+                    if (fds[i * 2 + 1].revents & POLLOUT)
                     {
                         activeConnections[i].connectionStatus = CS_WRITING_REQUEST;
                     }
                     break;
                 case CS_WRITING_REQUEST:
-                    if (fds[i * 2 + 1].revents == POLLOUT)
+                    if (fds[i * 2 + 1].revents & POLLOUT)
                     {
+                        logg_track(LL_VERBOSE, activeConnections[i].trackingId,
+                                   "Writing %zu bytes", activeConnections[i].buffer_size);
                         write(activeConnections[i].serverSocket, activeConnections[i].buffer,
                               activeConnections[i].buffer_size);
                         //write(1, activeConnections[i].buffer, activeConnections[i].buffer_size);
@@ -317,11 +339,14 @@ int main(int argc, const char * argv[])
                         }
                     }
                 case CS_FORWARDING_REQUEST:
-                    if (fds[i * 2].revents == POLLIN && fds[i * 2 + 1].revents == POLLOUT)
+                    if (fds[i * 2].revents & POLLIN && fds[i * 2 + 1].revents & POLLOUT)
                     {
+                        logg_track(LL_VERBOSE, activeConnections[i].trackingId, "Reading request");
                         ssize_t readCount = read(activeConnections[i].clientSocket, buff, BUFFER_SIZE);
                         if (readCount > 0)
                         {
+                            logg_track(LL_VERBOSE, activeConnections[i].trackingId,
+                                       "Forwarding %zi  bytes of request", readCount);
                             write(activeConnections[i].serverSocket, buff, (size_t) readCount);
                             logg_track(LL_VERBOSE, activeConnections[i].trackingId,
                                        "Forwarded %zi bytes of request", readCount);
@@ -337,8 +362,9 @@ int main(int argc, const char * argv[])
                     }
                     break;
                 case CS_FORWARDING_RESPONSE:
-                    if (fds[i * 2].revents == POLLOUT && fds[i * 2 + 1].revents == POLLIN)
+                    if (fds[i * 2].revents & POLLOUT && fds[i * 2 + 1].revents & POLLIN)
                     {
+                        logg_track(LL_VERBOSE, activeConnections[i].trackingId, "Reading response");
                         ssize_t readCount = read(activeConnections[i].serverSocket, buff, BUFFER_SIZE);
                         if (readCount == 0)
                         {
@@ -357,8 +383,10 @@ int main(int argc, const char * argv[])
                             continue;
                         }
 
+                        logg_track(LL_VERBOSE, activeConnections[i].trackingId,
+                                   "Forwarding %zi  bytes of response", readCount);
                         write(activeConnections[i].clientSocket, buff, (size_t) readCount);
-                        //write(1, buff, (size_t) readCount);
+                        write(1, buff, (size_t) readCount);
                         logg_track(LL_VERBOSE, activeConnections[i].trackingId,
                                    "Forwarded %zi bytes of response\n", readCount);
 
@@ -474,7 +502,7 @@ int main(int argc, const char * argv[])
                     break;
 
                 case CS_RESPONDING_FROM_CACHE:
-                    if (fds[i * 2].revents == POLLOUT)
+                    if (fds[i * 2].revents & POLLOUT)
                     {
                         struct cacheEntry entry = cache[activeConnections[i].cacheEntryIndex];
 
@@ -485,6 +513,8 @@ int main(int argc, const char * argv[])
                             bytesToWrite = WRITE_BY;
                         }
 
+                        logg_track(LL_VERBOSE, activeConnections[i].trackingId,
+                                   "Responding from cache %d bytes", bytesToWrite);
                         ssize_t bytesWritten = write(activeConnections[i].clientSocket, sendData, bytesToWrite);
                         //write(1, sendData, bytesToWrite);
 
@@ -506,16 +536,22 @@ int main(int argc, const char * argv[])
             }
         }
 
-        if (fds[connectionsCount * 2].revents == POLLIN)
+        if (fds[connectionsCount * 2].revents & POLLIN && !(fds[connectionsCount * 2].revents & POLLHUP))
         {
+            logg(LL_VERBOSE, "accept", "Accepting request %d", (int) fds[connectionsCount * 2].revents);
             SOCKET connectedSocket = accept(listenSocket, (struct sockaddr *) NULL, NULL);
-            activeConnections[connectionsCount].clientSocket = connectedSocket;
-            activeConnections[connectionsCount].buffer_size = 0;
-            activeConnections[connectionsCount].connectionStatus = CS_GETTING_REQUEST;
-            activeConnections[connectionsCount].trackingId = rand() % 9000 + 1000;
-            connectionsCount++;
 
-            printf("[I] [%d] Accepted incoming connection\n", activeConnections[connectionsCount - 1].trackingId);
+            if (connectedSocket != NULL)
+            {
+                logg(LL_VERBOSE, "accept ", "Accepted", (int) fds[connectionsCount * 2].revents);
+                activeConnections[connectionsCount].clientSocket = connectedSocket;
+                activeConnections[connectionsCount].buffer_size = 0;
+                activeConnections[connectionsCount].connectionStatus = CS_GETTING_REQUEST;
+                activeConnections[connectionsCount].trackingId = rand() % 9000 + 1000;
+                connectionsCount++;
+
+                printf("[I] [%d] Accepted incoming connection\n", activeConnections[connectionsCount - 1].trackingId);
+            }
         }
     }
 }
