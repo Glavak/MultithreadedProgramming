@@ -311,7 +311,7 @@ void * handleConnection(struct connection * connection)
                                "Writing %zu bytes", connection->buffer_size);
                     write(connection->serverSocket, connection->buffer,
                           connection->buffer_size);
-                    //write(1, connection->buffer, connection->buffer_size);
+                    write(1, connection->buffer, connection->buffer_size);
                     logg_track(LL_VERBOSE, connection->trackingId,
                                "Wrote %zu bytes", connection->buffer_size);
 
@@ -352,7 +352,8 @@ void * handleConnection(struct connection * connection)
                 }
                 break;
             case CS_FORWARDING_RESPONSE:
-                if (fds[0].revents & POLLOUT && fds[1].revents & POLLIN)
+//                logg_track(LL_VERBOSE, connection->trackingId, "%d;%d", fds[0].revents, fds[ 1].revents);
+                if (fds[0].revents & POLLOUT)
                 {
                     logg_track(LL_VERBOSE, connection->trackingId, "Reading response");
                     ssize_t readCount = read(connection->serverSocket, buff, BUFFER_SIZE);
