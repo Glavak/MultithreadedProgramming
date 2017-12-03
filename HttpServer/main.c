@@ -139,7 +139,7 @@ int main(int argc, const char *argv[])
         }
         printf("Polled: %d\n", polled);
 
-        char buff[1025];
+        char buff[32000];
         for (int i = 0; i < connectionsCount; ++i)
         {
             switch (activeConnections[i].connectionStatus)
@@ -177,15 +177,13 @@ int main(int argc, const char *argv[])
                             write(activeConnections[i].clientSocket, buff, (size_t) readCount);
                             printf("Wrote %d bytes\n", (int) readCount);
                         }
-
-                        if (readCount < sizeof(buff) - 1)
+                        else
                         {
                             close(activeConnections[i].clientSocket);
                             close(activeConnections[i].serverSocket);
-
-                            activeConnections[i] = activeConnections[connectionsCount - 1];
-                            connectionsCount--;
+                            activeConnections[i] = activeConnections[connectionsCount--];
                         }
+
                     }
                     break;
             }
