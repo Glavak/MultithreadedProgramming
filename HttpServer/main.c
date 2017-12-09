@@ -122,12 +122,8 @@ int main(int argc, const char *argv[])
                     fds[i * 2 + 1].events = POLLOUT;
                     break;
                 case CS_TRANSMITTING_REQUEST:
-                    fds[i * 2].events = POLLIN;
-                    fds[i * 2 + 1].events = POLLOUT;
-                    break;
-                case CS_TRANSMITTING_RESPONSE:
-                    fds[i * 2].events = POLLOUT;
-                    fds[i * 2 + 1].events = POLLIN;
+                    fds[i * 2].events = POLLIN | POLLOUT;
+                    fds[i * 2 + 1].events = POLLIN | POLLOUT;
                     break;
             }
         }
@@ -137,7 +133,7 @@ int main(int argc, const char *argv[])
         {
             log_error("eventLoop", "polling error");
         }
-        printf("Polled: %d\n", polled);
+        //printf("Polled: %d\n", polled);
 
         char buff[32000];
         for (int i = 0; i < connectionsCount; ++i)
@@ -148,10 +144,11 @@ int main(int argc, const char *argv[])
                     if (fds[i * 2 + 1].revents == POLLOUT)
                     {
                         activeConnections[i].connectionStatus = CS_TRANSMITTING_REQUEST;
+                        printf("Connected...\n");
                     }
                     break;
                 case CS_TRANSMITTING_REQUEST:
-                    if (fds[i * 2].revents == POLLIN && fds[i * 2 + 1].revents == POLLOUT)
+                    if ((fds[i * 2].revents & POLLIN) && (fds[i * 2 + 1].revents & POLLOUT))
                     {
                         ssize_t readCount = read(activeConnections[i].clientSocket, buff, sizeof(buff) - 1);
                         printf("Transmitting request, %d bytes...\n", (int) readCount);
@@ -160,15 +157,15 @@ int main(int argc, const char *argv[])
                             write(activeConnections[i].serverSocket, buff, (size_t) readCount);
                             printf("Wrote %d bytes\n", (int) readCount);
                         }
-
-                        if (readCount < sizeof(buff) - 1)
+                        else
                         {
-                            activeConnections[i].connectionStatus = CS_TRANSMITTING_RESPONSE;
+                            close(activeConnections[i].clientSocket);
+                            close(activeConnections[i].serverSocket);
+                            activeConnections[i] = activeConnections[connectionsCount--];
                         }
                     }
-                    break;
-                case CS_TRANSMITTING_RESPONSE:
-                    if (fds[i * 2].revents == POLLOUT && fds[i * 2 + 1].revents == POLLIN)
+
+                    if ((fds[i * 2].revents & POLLOUT) && (fds[i * 2 + 1].revents & POLLIN))
                     {
                         ssize_t readCount = read(activeConnections[i].serverSocket, buff, sizeof(buff) - 1);
                         printf("Transmitting response, %d bytes...\n", (int) readCount);
@@ -185,6 +182,7 @@ int main(int argc, const char *argv[])
                         }
 
                     }
+
                     break;
             }
         }
