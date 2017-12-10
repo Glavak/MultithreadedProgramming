@@ -104,8 +104,6 @@ void readArgs(int argc, const char * argv[], uint16_t * outLocalPort)
     *outLocalPort = (uint16_t) localPort;
 }
 
-static struct cacheEntry cache[1024];
-static size_t cacheSize = 0;
 static SOCKET listenSocket;
 
 static void exit_handler(void)
@@ -138,10 +136,6 @@ void * handleConnection(struct connection * connection)
                 fds[1].events = 0;
                 break;
 
-            case CS_CONNECTING_TO_SERVER:
-                fds[0].events = 0;
-                fds[1].events = POLLOUT;
-                break;
             case CS_WRITING_REQUEST:
                 fds[0].events = 0;
                 fds[1].events = POLLOUT;
@@ -153,11 +147,6 @@ void * handleConnection(struct connection * connection)
             case CS_FORWARDING_RESPONSE:
                 fds[0].events = POLLOUT;
                 fds[1].events = POLLIN;
-                break;
-
-            case CS_RESPONDING_FROM_CACHE:
-                fds[0].events = POLLOUT;
-                fds[1].events = 0;
                 break;
         }
 
@@ -226,84 +215,14 @@ void * handleConnection(struct connection * connection)
                                                     connection->buffer_size);
                         if (url != NULL)
                         {
-                            if (!isMethodGet(connection->buffer))
-                            {
-                                logg_track(LL_WARNING, connection->trackingId,
-                                           "Only GET methods allowed, connection dropped");
-
-                                close(connection->clientSocket);
-                                free(connection->buffer);
-                                free(url);
-
-                                return NULL;
-                            }
-                            else
-                            {
-                                int foundInCache = 0;
-                                for (int j = 0; j < cacheSize; ++j)
-                                {
-                                    if (strcmp(cache[j].url, url) == 0)
-                                    {
-                                        if (cache[j].entryStatus == ES_VALID)
-                                        {
-                                            logg_track(LL_VERBOSE, connection->trackingId,
-                                                       "Found cache entry for %s, responding from cache", url);
-
-                                            free(connection->buffer);
-
-                                            connection->cacheEntryIndex = j;
-                                            connection->cacheBytesWritten = 0;
-                                            connection->connectionStatus = CS_RESPONDING_FROM_CACHE;
-                                        }
-                                        else if (cache[j].entryStatus == ES_DOWNLOADING)
-                                        {
-                                            logg_track(LL_VERBOSE, connection->trackingId,
-                                                       "Found not finished cache entry for %s, responding from server",
-                                                       url);
-
-                                            connection->cacheEntryIndex = -1; // Do not save to cache, as other client already working on it
-                                            connection->connectionStatus = CS_CONNECTING_TO_SERVER;
-                                            connection->serverSocket = initServerSocketToUrl(url);
-                                            editRequestToSendToServer(connection);
-                                        }
-                                        else
-                                        {
-                                            continue;
-                                        }
-
-                                        foundInCache = 1;
-                                        free(url);
-                                        break;
-                                    }
-                                }
-
-                                if (!foundInCache)
-                                {
-                                    logg_track(LL_VERBOSE, connection->trackingId,
-                                               "Cache entry for %s not found, responding from server", url);
-
-                                    cache[cacheSize].url = url;
-                                    cache[cacheSize].entryStatus = ES_DOWNLOADING;
-                                    cache[cacheSize].dataCount = 0;
-                                    cacheSize++;
-
-                                    connection->cacheEntryIndex = (int) (cacheSize - 1);
-                                    connection->connectionStatus = CS_CONNECTING_TO_SERVER;
-                                    connection->serverSocket = initServerSocketToUrl(url);
-                                    editRequestToSendToServer(connection);
-                                }
-                            }
+                            connection->connectionStatus = CS_WRITING_REQUEST;
+                            connection->serverSocket = initServerSocketToUrl(url);
+                            editRequestToSendToServer(connection);
                         }
                     }
                 }
                 break;
 
-            case CS_CONNECTING_TO_SERVER:
-                if (fds[1].revents & POLLOUT)
-                {
-                    connection->connectionStatus = CS_WRITING_REQUEST;
-                }
-                break;
             case CS_WRITING_REQUEST:
                 if (fds[1].revents & POLLOUT)
                 {
@@ -360,10 +279,6 @@ void * handleConnection(struct connection * connection)
                     if (readCount == 0)
                     {
                         logg_track(LL_INFO, connection->trackingId, "Transmission over, socket closed");
-                        if (connection->cacheEntryIndex != -1)
-                        {
-                            cache[connection->cacheEntryIndex].entryStatus = ES_VALID;
-                        }
 
                         free(connection->buffer);
                         close(connection->clientSocket);
@@ -378,19 +293,6 @@ void * handleConnection(struct connection * connection)
                     write(1, buff, (size_t) readCount);
                     logg_track(LL_VERBOSE, connection->trackingId,
                                "Forwarded %zi bytes of response\n", readCount);
-
-                    if (connection->cacheEntryIndex != -1)
-                    {
-                        struct cacheEntry * entry = &cache[connection->cacheEntryIndex];
-
-                        entry->dataCount += (size_t) readCount;
-                        entry->data = realloc(entry->data,
-                                              entry->dataCount);
-
-                        char * dest = entry->data + entry->dataCount - readCount;
-
-                        memcpy(dest, buff, (size_t) readCount);
-                    }
 
                     if (connection->left_to_download == -1)
                     {
@@ -417,13 +319,6 @@ void * handleConnection(struct connection * connection)
 
                                 if (contentLength != -1)
                                 {
-                                    if (statusCode != 200)
-                                    {
-                                        free(cache[connection->cacheEntryIndex].data);
-                                        cache[connection->cacheEntryIndex].entryStatus = ES_INVALID;
-                                        connection->cacheEntryIndex = -1;
-                                    }
-
                                     connection->left_to_download =
                                             contentLength - connection->buffer_size + (j + 3);
 
@@ -434,10 +329,7 @@ void * handleConnection(struct connection * connection)
                                     {
                                         logg_track(LL_INFO, connection->trackingId,
                                                    "Transmission over, Content-Length reached");
-                                        if (connection->cacheEntryIndex != -1)
-                                        {
-                                            cache[connection->cacheEntryIndex].entryStatus = ES_VALID;
-                                        }
+
                                         close(connection->clientSocket);
                                         close(connection->serverSocket);
 
@@ -446,10 +338,6 @@ void * handleConnection(struct connection * connection)
                                 }
                                 else
                                 {
-                                    free(cache[connection->cacheEntryIndex].data);
-                                    cache[connection->cacheEntryIndex].entryStatus = ES_INVALID;
-                                    connection->cacheEntryIndex = -1;
-
                                     if (!isResponseHasPayload(statusCode))
                                     {
                                         logg_track(LL_INFO, connection->trackingId,
@@ -473,49 +361,12 @@ void * handleConnection(struct connection * connection)
                         {
                             logg_track(LL_INFO, connection->trackingId,
                                        "Transmission over, Content-Length reached");
-                            if (connection->cacheEntryIndex != -1)
-                            {
-                                cache[connection->cacheEntryIndex].entryStatus = ES_VALID;
-                            }
 
                             close(connection->clientSocket);
                             close(connection->serverSocket);
 
                             return NULL;
                         }
-                    }
-                }
-                break;
-
-            case CS_RESPONDING_FROM_CACHE:
-                if (fds[0].revents & POLLOUT)
-                {
-                    struct cacheEntry entry = cache[connection->cacheEntryIndex];
-
-                    char * sendData = entry.data + connection->cacheBytesWritten;
-                    size_t bytesToWrite = entry.dataCount - connection->cacheBytesWritten;
-                    if (bytesToWrite > WRITE_BY)
-                    {
-                        bytesToWrite = WRITE_BY;
-                    }
-
-                    logg_track(LL_VERBOSE, connection->trackingId,
-                               "Responding from cache %d bytes", bytesToWrite);
-                    ssize_t bytesWritten = write(connection->clientSocket, sendData, bytesToWrite);
-                    //write(1, sendData, bytesToWrite);
-
-                    logg_track(LL_VERBOSE, connection->trackingId,
-                               "Wrote %zi bytes from cache", bytesWritten);
-
-                    connection->cacheBytesWritten += bytesWritten;
-                    if (connection->cacheBytesWritten >= entry.dataCount)
-                    {
-                        logg_track(LL_INFO, connection->trackingId,
-                                   "Transmission over, responded from cache");
-                        close(connection->clientSocket);
-                        close(connection->serverSocket);
-
-                        return NULL;
                     }
                 }
                 break;

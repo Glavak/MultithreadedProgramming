@@ -126,6 +126,52 @@ long getContentLengthFromData(char * httpData, size_t dataLength)
     }
 }
 
+enum ConnectionCloseType isConnectionClose(char * httpData, size_t dataLength)
+{
+    char * headerStart = "Connection:";
+    size_t headerStartLen = strlen(headerStart);
+
+    int i = 0;
+    while (1)
+    {
+        while (httpData[i] != '\n')
+        {
+            if (i + 1 >= dataLength)
+            {
+                return CCT_UnknownYet;
+            }
+            i++;
+        }
+
+        i++;
+
+        int matches = 1;
+        for (int j = 0; j < headerStartLen; ++j)
+        {
+            if (httpData[i + j] != headerStart[j])
+            {
+                matches = 0;
+                break;
+            }
+        }
+
+        if (matches)
+        {
+            i += headerStartLen;
+
+            char * end;
+
+            long contentLength = strtol(httpData + i, &end, 10);
+            if (end == httpData + i || contentLength <= 0)
+            {
+                // Something went wrong
+                return -1;
+            }
+            return contentLength;
+        }
+    }
+}
+
 int isMethodHasPayload(char * method)
 {
     if (method[0] == 'G' &&

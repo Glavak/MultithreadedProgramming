@@ -23,6 +23,15 @@ int getResponseCodeFromData(char * httpData);
 // -1 if no Content-Length header found (yet?)
 long getContentLengthFromData(char * httpData, size_t dataLength);
 
+enum ConnectionCloseType
+{
+    CCT_Close,
+    CCT_KeepAlive,
+    CCT_UnknownYet
+};
+
+enum ConnectionCloseType isConnectionClose(char * httpData, size_t dataLength);
+
 int isMethodHasPayload(char * method);
 
 int isResponseHasPayload(int statusCode);
