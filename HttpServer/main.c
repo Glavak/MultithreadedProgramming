@@ -352,8 +352,8 @@ int main(int argc, const char * argv[])
                             perror("read");
                         }
 
-                        if (buff[readCount - 3] == '\n' &&
-                            buff[readCount - 1] == '\n')
+                        if ((buff[readCount - 3] == '\n' &&
+                            buff[readCount - 1] == '\n') || readCount == 0)
                         {
                             activeConnections[i].buffer_size = 0;
                             activeConnections[i].left_to_download = -1;
