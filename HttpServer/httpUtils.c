@@ -172,6 +172,18 @@ enum ConnectionCloseType isConnectionClose(char * httpData, size_t dataLength)
     }
 }
 
+int isDataHasAllHeaders(char * httpData, size_t dataLength)
+{
+    for (int i = 0; i < dataLength - 2; ++i)
+    {
+        if (httpData[i] == '\n' && httpData[i + 2] == '\n')
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int isMethodHasPayload(char * method)
 {
     if (method[0] == 'G' &&

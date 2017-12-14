@@ -32,6 +32,8 @@ enum ConnectionCloseType
 
 enum ConnectionCloseType isConnectionClose(char * httpData, size_t dataLength);
 
+int isDataHasAllHeaders(char * httpData, size_t dataLength);
+
 int isMethodHasPayload(char * method);
 
 int isResponseHasPayload(int statusCode);
