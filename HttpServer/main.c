@@ -57,7 +57,7 @@ SOCKET initializeServerSocket(struct sockaddr_in address)
     return clientSocket;
 }
 
-void readArgs(int argc, const char *argv[], uint16_t *outLocalPort, char **outServerIp, uint16_t *outServerPort)
+void readArgs(int argc, const char * argv[], uint16_t * outLocalPort, char ** outServerIp, uint16_t * outServerPort)
 {
     if (argc < 4)
     {
@@ -66,7 +66,7 @@ void readArgs(int argc, const char *argv[], uint16_t *outLocalPort, char **outSe
         log_error("main", message);
     }
 
-    char *end;
+    char * end;
 
     long localPort = strtol(argv[1], &end, 10);
     if (*end != '\0' || localPort <= 0 || localPort >= UINT16_MAX)
@@ -85,10 +85,10 @@ void readArgs(int argc, const char *argv[], uint16_t *outLocalPort, char **outSe
     *outServerPort = (uint16_t) serverPort;
 }
 
-int main(int argc, const char *argv[])
+int main(int argc, const char * argv[])
 {
     uint16_t localPort, serverPort;
-    char *serverIp;
+    char * serverIp;
 
     readArgs(argc, argv, &localPort, &serverIp, &serverPort);
 
@@ -99,14 +99,13 @@ int main(int argc, const char *argv[])
     while (1)
     {
         SOCKET connectedSocket = accept(listenSocket, (struct sockaddr *) NULL, NULL);
-        if (connectedSocket != -1)
+        if (connectedSocket > 0)
         {
             printf("Accepted!\n");
             SOCKET serverSocket = initializeServerSocket(getServerAddress(serverIp, serverPort));
 
             activeConnections[connectionsCount].clientSocket = connectedSocket;
             activeConnections[connectionsCount].serverSocket = serverSocket;
-            activeConnections[connectionsCount].connectionStatus = CS_CONNECTING_TO_SERVER;
             connectionsCount++;
         }
 
@@ -115,17 +114,9 @@ int main(int argc, const char *argv[])
         {
             fds[i * 2].fd = activeConnections[i].clientSocket;
             fds[i * 2 + 1].fd = activeConnections[i].serverSocket;
-            switch (activeConnections[i].connectionStatus)
-            {
-                case CS_CONNECTING_TO_SERVER:
-                    fds[i * 2].events = 0;
-                    fds[i * 2 + 1].events = POLLOUT;
-                    break;
-                case CS_TRANSMITTING_REQUEST:
-                    fds[i * 2].events = POLLIN | POLLOUT;
-                    fds[i * 2 + 1].events = POLLIN | POLLOUT;
-                    break;
-            }
+
+            fds[i * 2].events = POLLIN | POLLOUT;
+            fds[i * 2 + 1].events = POLLIN | POLLOUT;
         }
 
         int polled = poll(fds, connectionsCount * 2, 1000 * 2);
@@ -138,52 +129,60 @@ int main(int argc, const char *argv[])
         char buff[32000];
         for (int i = 0; i < connectionsCount; ++i)
         {
-            switch (activeConnections[i].connectionStatus)
+            if ((fds[i * 2].revents & POLLIN) && (fds[i * 2 + 1].revents & POLLOUT))
             {
-                case CS_CONNECTING_TO_SERVER:
-                    if (fds[i * 2 + 1].revents == POLLOUT)
+                ssize_t readCount = read(activeConnections[i].clientSocket, buff, sizeof(buff) - 1);
+                printf("Transmitting request, %d bytes...\n", (int) readCount);
+                if(readCount == -1)
+                {
+                    perror("reaad");
+                }
+                else if (readCount > 0)
+                {
+                    ssize_t n = send(activeConnections[i].serverSocket, buff, (size_t) readCount, 0);
+                    if (n < 0 && errno == EPIPE)
                     {
-                        activeConnections[i].connectionStatus = CS_TRANSMITTING_REQUEST;
-                        printf("Connected...\n");
-                    }
-                    break;
-                case CS_TRANSMITTING_REQUEST:
-                    if ((fds[i * 2].revents & POLLIN) && (fds[i * 2 + 1].revents & POLLOUT))
-                    {
-                        ssize_t readCount = read(activeConnections[i].clientSocket, buff, sizeof(buff) - 1);
-                        printf("Transmitting request, %d bytes...\n", (int) readCount);
-                        if (readCount > 0)
-                        {
-                            write(activeConnections[i].serverSocket, buff, (size_t) readCount);
-                            printf("Wrote %d bytes\n", (int) readCount);
-                        }
-                        else
-                        {
-                            close(activeConnections[i].clientSocket);
-                            close(activeConnections[i].serverSocket);
-                            activeConnections[i] = activeConnections[connectionsCount--];
-                        }
+                        shutdown(activeConnections[i].clientSocket, SHUT_RD);
+                        shutdown(activeConnections[i].serverSocket, SHUT_WR);
+                        activeConnections[i] = activeConnections[connectionsCount--];
                     }
 
-                    if ((fds[i * 2].revents & POLLOUT) && (fds[i * 2 + 1].revents & POLLIN))
-                    {
-                        ssize_t readCount = read(activeConnections[i].serverSocket, buff, sizeof(buff) - 1);
-                        printf("Transmitting response, %d bytes...\n", (int) readCount);
-                        if (readCount > 0)
-                        {
-                            write(activeConnections[i].clientSocket, buff, (size_t) readCount);
-                            printf("Wrote %d bytes\n", (int) readCount);
-                        }
-                        else
-                        {
-                            close(activeConnections[i].clientSocket);
-                            close(activeConnections[i].serverSocket);
-                            activeConnections[i] = activeConnections[connectionsCount--];
-                        }
+                    printf("Wrote %d bytes\n", (int) readCount);
+                }
+                else
+                {
+                    shutdown(activeConnections[i].clientSocket, SHUT_RD);
+                    shutdown(activeConnections[i].serverSocket, SHUT_WR);
+                    activeConnections[i] = activeConnections[connectionsCount--];
+                }
+            }
 
+            if ((fds[i * 2].revents & POLLOUT) && (fds[i * 2 + 1].revents & POLLIN))
+            {
+                ssize_t readCount = read(activeConnections[i].serverSocket, buff, sizeof(buff) - 1);
+                printf("Transmitting response, %d bytes...\n", (int) readCount);
+                if(readCount == -1)
+                {
+                    perror("reaad");
+                }
+                else if (readCount > 0)
+                {
+                    ssize_t n = send(activeConnections[i].clientSocket, buff, (size_t) readCount, 0);
+                    if (n < 0 && errno == EPIPE)
+                    {
+                        shutdown(activeConnections[i].clientSocket, SHUT_WR);
+                        shutdown(activeConnections[i].serverSocket, SHUT_RD);
+                        activeConnections[i] = activeConnections[connectionsCount--];
                     }
 
-                    break;
+                    printf("Wrote %d bytes\n", (int) readCount);
+                }
+                else
+                {
+                    shutdown(activeConnections[i].clientSocket, SHUT_WR);
+                    shutdown(activeConnections[i].serverSocket, SHUT_RD);
+                    activeConnections[i] = activeConnections[connectionsCount--];
+                }
             }
         }
     }
